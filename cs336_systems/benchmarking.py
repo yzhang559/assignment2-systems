@@ -200,6 +200,8 @@ def run_all(args, device: str):
                 "mode": args.mode,
                 "context_length": args.context_length,
                 "batch_size": args.batch_size,
+                "warmup_steps": args.warmup_steps,
+                "measure_steps": args.measure_steps,
                 "d_model": config["d_model"],
                 "d_ff": config["d_ff"],
                 "num_layers": config["num_layers"],
@@ -217,10 +219,24 @@ def run_all(args, device: str):
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-    export_results_tables(results, args.output_dir, args.mode, args.context_length)
+    export_results_tables(
+        results,
+        args.output_dir,
+        args.mode,
+        args.context_length,
+        args.warmup_steps,
+        args.measure_steps,
+    )
 
 
-def export_results_tables(results: list[dict], output_dir: str, mode: str, context_length: int):
+def export_results_tables(
+    results: list[dict],
+    output_dir: str,
+    mode: str,
+    context_length: int,
+    warmup_steps: int,
+    measure_steps: int,
+):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -235,12 +251,14 @@ def export_results_tables(results: list[dict], output_dir: str, mode: str, conte
         "num_heads",
         "context_length",
         "batch_size",
+        "warmup_steps",
+        "measure_steps",
     ]
     table_df = df[table_columns].copy()
     table_df["mean_time_ms"] = table_df["mean_time_ms"].map(lambda x: f"{x:.3f}")
     table_df["std_time_ms"] = table_df["std_time_ms"].map(lambda x: f"{x:.3f}")
 
-    suffix = f"{mode}_ctx{context_length}"
+    suffix = f"{mode}_ctx{context_length}_wu{warmup_steps}_ms{measure_steps}"
     csv_path = output_path / f"{suffix}.csv"
     markdown_path = output_path / f"{suffix}.md"
 
