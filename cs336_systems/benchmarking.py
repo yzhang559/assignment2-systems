@@ -1,7 +1,9 @@
 import argparse
 import statistics
 import timeit
+from pathlib import Path
 
+import pandas as pd
 import torch
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
@@ -149,6 +151,7 @@ def main():
     parser.add_argument("--num_layers", type=int, default=12)
     parser.add_argument("--num_heads", type=int, default=12)
     parser.add_argument("--context_length", type=int, default=256)
+    parser.add_argument("--output_dir", type=str, default="benchmark_results")
 
     args = parser.parse_args()
 
@@ -194,8 +197,17 @@ def run_all(args, device: str):
         results.append(
             {
                 "model_name": model_name,
+                "mode": args.mode,
+                "context_length": args.context_length,
+                "batch_size": args.batch_size,
+                "d_model": config["d_model"],
+                "d_ff": config["d_ff"],
+                "num_layers": config["num_layers"],
+                "num_heads": config["num_heads"],
                 "mean_time": mean_time,
                 "std_time": std_time,
+                "mean_time_ms": mean_time * 1000.0,
+                "std_time_ms": std_time * 1000.0,
             }
         )
 
@@ -204,6 +216,39 @@ def run_all(args, device: str):
         del y
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
+
+    export_results_tables(results, args.output_dir, args.mode, args.context_length)
+
+
+def export_results_tables(results: list[dict], output_dir: str, mode: str, context_length: int):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(results)
+    table_columns = [
+        "model_name",
+        "mean_time_ms",
+        "std_time_ms",
+        "d_model",
+        "d_ff",
+        "num_layers",
+        "num_heads",
+        "context_length",
+        "batch_size",
+    ]
+    table_df = df[table_columns].copy()
+    table_df["mean_time_ms"] = table_df["mean_time_ms"].map(lambda x: f"{x:.3f}")
+    table_df["std_time_ms"] = table_df["std_time_ms"].map(lambda x: f"{x:.3f}")
+
+    suffix = f"{mode}_ctx{context_length}"
+    csv_path = output_path / f"{suffix}.csv"
+    markdown_path = output_path / f"{suffix}.md"
+
+    df.to_csv(csv_path, index=False)
+    markdown_path.write_text(table_df.to_markdown(index=False) + "\n", encoding="utf-8")
+
+    print(f"saved: {csv_path}")
+    print(f"saved: {markdown_path}")
 
 
 if __name__ == "__main__":
