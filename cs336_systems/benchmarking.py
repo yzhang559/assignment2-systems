@@ -1,45 +1,15 @@
 import argparse
 import statistics
 import timeit
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
 import torch
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
-
-MODEL_SIZES = {
-    "small": {
-        "d_model": 768,
-        "d_ff": 3072,
-        "num_layers": 12,
-        "num_heads": 12,
-    },
-    "medium": {
-        "d_model": 1024,
-        "d_ff": 4096,
-        "num_layers": 24,
-        "num_heads": 16,
-    },
-    "large": {
-        "d_model": 1280,
-        "d_ff": 5120,
-        "num_layers": 36,
-        "num_heads": 20,
-    },
-    "xl": {
-        "d_model": 1600,
-        "d_ff": 6400,
-        "num_layers": 48,
-        "num_heads": 25,
-    },
-    "2.7B": {
-        "d_model": 2560,
-        "d_ff": 10240,
-        "num_layers": 32,
-        "num_heads": 32,
-    },
-}
+from cs336_basics.optimizer import AdamW
+from cs336_systems.utils import MODEL_SIZES, add_shared_benchmark_args, make_random_batch, resolve_device
 
 
 def init_model(args, device: str):
@@ -71,12 +41,6 @@ def synchronize(device: str):
         torch.mps.synchronize()
 
 
-def make_random_batch(batch_size: int, context_length: int, vocab_size: int, device: str):
-    x = torch.randint(0, vocab_size, (batch_size, context_length), device=device)
-    y = torch.randint(0, vocab_size, (batch_size, context_length), device=device)
-    return x, y
-
-
 def run_benchmark(
     model: BasicsTransformerLM,
     device: str,
@@ -85,80 +49,105 @@ def run_benchmark(
     measure_steps: int,
     x: torch.Tensor,
     y: torch.Tensor,
+    mixed_precision: bool = False,
+    memory_profile: bool = False,
+    model_name: str = "",
+    context_length: int = 0,
+    batch_size: int = 0,
 ):
     model.train()
-    step_times = []
+    optimizer = AdamW(model.parameters(), lr=1e-3)
 
-    for _ in range(warmup_steps):
-        if mode == "forward":
-            with torch.no_grad():
-                logits = model.forward(x)
-                loss = cross_entropy(logits, y)
-        elif mode == "forward_backward":
-            model.zero_grad(set_to_none=True)
-            logits = model.forward(x)
-            loss = cross_entropy(logits, y)
-            loss.backward()
+    autocast_ctx = torch.autocast(device, dtype=torch.bfloat16) if mixed_precision else nullcontext()
 
-    for _ in range(measure_steps):
-        if mode == "forward":
+    forward_samples = []
+    backward_samples = []
+    optimizer_samples = []
+
+    with autocast_ctx:
+        for i in range(warmup_steps + measure_steps):
+            if memory_profile and i == warmup_steps:
+                torch.cuda.memory._record_memory_history(max_entries=1000000)
+
             synchronize(device)
-            start = timeit.default_timer()
-            with torch.no_grad():
-                logits = model.forward(x)
-                loss = cross_entropy(logits, y)
-                synchronize(device)
-                end = timeit.default_timer()
-
-        elif mode == "forward_backward":
-            model.zero_grad(set_to_none=True)
-            synchronize(device)
-            start = timeit.default_timer()
+            t0 = timeit.default_timer()
             logits = model(x)
-            loss = cross_entropy(logits, y)
-            loss.backward()
             synchronize(device)
-            end = timeit.default_timer()
+            dt_forward = timeit.default_timer() - t0
 
-        step_times.append(end - start)
+            dt_backward = 0.0
+            if mode in ("forward_backward", "train_step"):
+                loss = cross_entropy(logits, y)
+                t1 = timeit.default_timer()
+                loss.backward()
+                synchronize(device)
+                dt_backward = timeit.default_timer() - t1
 
-    mean_time = statistics.mean(step_times)
-    std_time = statistics.stdev(step_times) if len(step_times) > 1 else 0.0
+            dt_optimizer = 0.0
+            if mode == "train_step":
+                t2 = timeit.default_timer()
+                optimizer.step()
+                synchronize(device)
+                dt_optimizer = timeit.default_timer() - t2
+                optimizer.zero_grad(set_to_none=True)
+            else:
+                model.zero_grad(set_to_none=True)
+
+            if i >= warmup_steps:
+                forward_samples.append(dt_forward)
+                backward_samples.append(dt_backward)
+                optimizer_samples.append(dt_optimizer)
+
+        if memory_profile:
+            mixed_str = "_bf16" if mixed_precision else ""
+            snapshot_filename = (
+                f"memory_snapshot_{model_name}_{mode}_ctx{context_length}_bs{batch_size}{mixed_str}.pickle"
+            )
+            torch.cuda.memory._dump_snapshot(snapshot_filename)
+            torch.cuda.memory._record_memory_history(enabled=None)
+            print(f"Memory snapshot saved: {snapshot_filename}")
+
+    def stats(samples):
+        if not samples or all(s == 0.0 for s in samples):
+            return 0.0, 0.0
+        mean = statistics.mean(samples)
+        std = statistics.stdev(samples) if len(samples) > 1 else 0.0
+        return mean, std
+
+    forward_mean, forward_std = stats(forward_samples)
+    backward_mean, backward_std = stats(backward_samples)
+    optimizer_mean, optimizer_std = stats(optimizer_samples)
+
+    total_samples = [f + b + o for f, b, o in zip(forward_samples, backward_samples, optimizer_samples)]
+    total_mean, total_std = stats(total_samples)
 
     print(f"mode={mode}")
-    print(f"step_times={[round(t, 6) for t in step_times]}")
-    print(f"mean={mean_time:.6f}s std={std_time:.6f}s")
+    print(f"forward:   mean={forward_mean*1000:.3f}ms std={forward_std*1000:.3f}ms")
+    print(f"backward:  mean={backward_mean*1000:.3f}ms std={backward_std*1000:.3f}ms")
+    print(f"optimizer: mean={optimizer_mean*1000:.3f}ms std={optimizer_std*1000:.3f}ms")
+    print(f"total:     mean={total_mean*1000:.3f}ms std={total_std*1000:.3f}ms")
 
-    return step_times, mean_time, std_time
+    return {
+        "forward_mean": forward_mean, "forward_std": forward_std,
+        "backward_mean": backward_mean, "backward_std": backward_std,
+        "optimizer_mean": optimizer_mean, "optimizer_std": optimizer_std,
+        "total_mean": total_mean, "total_std": total_std,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark TransformerLM")
-
-    parser.add_argument("--mode", choices=["forward", "forward_backward"], default="forward")
-    parser.add_argument(
-        "--device", type=str, default=None, help="Device to use (cuda/mps/cpu). Auto-detected if not set."
+    add_shared_benchmark_args(
+        parser,
+        modes=("forward", "forward_backward", "train_step"),
+        default_mode="forward",
+        include_output_args=True,
     )
-    parser.add_argument("--warmup_steps", type=int, default=5)
-    parser.add_argument("--measure_steps", type=int, default=10)
-
-    parser.add_argument("--vocab_size", type=int, default=10000)
-    parser.add_argument("--batch_size", type=int, default=4)
-
-    # Model hyperparameters
-    parser.add_argument("--d_model", type=int, default=768)
-    parser.add_argument("--d_ff", type=int, default=3072)
-    parser.add_argument("--num_layers", type=int, default=12)
-    parser.add_argument("--num_heads", type=int, default=12)
-    parser.add_argument("--context_length", type=int, default=256)
-    parser.add_argument("--output_dir", type=str, default="benchmark_results")
-
+    parser.add_argument("--mixed_precision", action="store_true", help="Use BF16 mixed precision")
+    parser.add_argument("--memory_profile", action="store_true", help="Enable CUDA memory profiling")
     args = parser.parse_args()
 
-    if args.device is None:
-        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    else:
-        device = args.device
+    device = resolve_device(args.device)
     print(f"using device: {device}")
 
     run_all(args, device)
@@ -173,7 +162,12 @@ def main():
 def run_all(args, device: str):
     results = []
 
-    for model_name, config in MODEL_SIZES.items():
+    if args.model_size == "all":
+        selected_sizes = MODEL_SIZES.items()
+    else:
+        selected_sizes = [(args.model_size, MODEL_SIZES[args.model_size])]
+
+    for model_name, config in selected_sizes:
         print(f"\n===== Benchmarking {model_name} =====")
 
         args.d_model = config["d_model"]
@@ -184,7 +178,7 @@ def run_all(args, device: str):
         model = init_model(args, device)
         x, y = make_random_batch(args.batch_size, args.context_length, args.vocab_size, device)
 
-        step_times, mean_time, std_time = run_benchmark(
+        timing = run_benchmark(
             model,
             device,
             args.mode,
@@ -192,12 +186,18 @@ def run_all(args, device: str):
             args.measure_steps,
             x,
             y,
+            mixed_precision=args.mixed_precision,
+            memory_profile=args.memory_profile,
+            model_name=model_name,
+            context_length=args.context_length,
+            batch_size=args.batch_size,
         )
 
         results.append(
             {
                 "model_name": model_name,
                 "mode": args.mode,
+                "mixed_precision": args.mixed_precision,
                 "context_length": args.context_length,
                 "batch_size": args.batch_size,
                 "warmup_steps": args.warmup_steps,
@@ -206,10 +206,14 @@ def run_all(args, device: str):
                 "d_ff": config["d_ff"],
                 "num_layers": config["num_layers"],
                 "num_heads": config["num_heads"],
-                "mean_time": mean_time,
-                "std_time": std_time,
-                "mean_time_ms": mean_time * 1000.0,
-                "std_time_ms": std_time * 1000.0,
+                "forward_mean_ms": timing["forward_mean"] * 1000.0,
+                "forward_std_ms": timing["forward_std"] * 1000.0,
+                "backward_mean_ms": timing["backward_mean"] * 1000.0,
+                "backward_std_ms": timing["backward_std"] * 1000.0,
+                "optimizer_mean_ms": timing["optimizer_mean"] * 1000.0,
+                "optimizer_std_ms": timing["optimizer_std"] * 1000.0,
+                "total_mean_ms": timing["total_mean"] * 1000.0,
+                "total_std_ms": timing["total_std"] * 1000.0,
             }
         )
 
@@ -218,6 +222,9 @@ def run_all(args, device: str):
         del y
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
+
+    if args.skip_write_out:
+        return
 
     export_results_tables(
         results,
@@ -243,22 +250,21 @@ def export_results_tables(
     df = pd.DataFrame(results)
     table_columns = [
         "model_name",
-        "mean_time_ms",
-        "std_time_ms",
+        "forward_mean_ms",
+        "backward_mean_ms",
+        "optimizer_mean_ms",
+        "total_mean_ms",
         "d_model",
-        "d_ff",
         "num_layers",
-        "num_heads",
         "context_length",
         "batch_size",
-        "warmup_steps",
-        "measure_steps",
     ]
     table_df = df[table_columns].copy()
-    table_df["mean_time_ms"] = table_df["mean_time_ms"].map(lambda x: f"{x:.3f}")
-    table_df["std_time_ms"] = table_df["std_time_ms"].map(lambda x: f"{x:.3f}")
+    for col in ["forward_mean_ms", "backward_mean_ms", "optimizer_mean_ms", "total_mean_ms"]:
+        table_df[col] = table_df[col].map(lambda x: f"{x:.3f}")
 
-    suffix = f"{mode}_ctx{context_length}_wu{warmup_steps}_ms{measure_steps}"
+    mixed_str = "_bf16" if results[0].get("mixed_precision") else ""
+    suffix = f"{mode}_ctx{context_length}_wu{warmup_steps}_ms{measure_steps}{mixed_str}"
     csv_path = output_path / f"{suffix}.csv"
     markdown_path = output_path / f"{suffix}.md"
 
