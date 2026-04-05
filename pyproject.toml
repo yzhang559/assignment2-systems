@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "cs336-basics",
+    "einops",
     "humanfriendly",
     "matplotlib",
     "numpy<2.0.0",
@@ -13,6 +14,7 @@ dependencies = [
     "regex>=2024.11.6",
     "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
+    "triton>=3.0.0; sys_platform == 'linux'",
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "pandas>=2",
