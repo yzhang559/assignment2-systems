@@ -8,7 +8,7 @@ dependencies = [
     "cs336-basics",
     "humanfriendly",
     "matplotlib",
-    "numpy<2.0.0",
+    "numpy",
     "pytest>=8",
     "regex>=2026.3.32",
     "torch~=2.11.0",
