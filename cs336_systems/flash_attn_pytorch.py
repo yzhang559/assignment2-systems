@@ -3,6 +3,25 @@ import math
 import torch.autograd
 
 
+def _flash_backward(q, k, v, O, dO, L):
+    d = q.shape[-1]
+
+    D = torch.sum(dO * O, dim=-1)
+    S = q @ k.transpose(-1, -2) * (d ** -0.5)
+    P = torch.exp(S - L.unsqueeze(-1))
+
+    dV = P.transpose(-1, -2) @ dO
+    dP = dO @ v.transpose(-1, -2)
+    dS = P * (dP - D.unsqueeze(-1))
+
+    dQ = dS @ k * (d ** -0.5)
+    dK = dS.transpose(-1, -2) @ q * (d ** -0.5)
+    return dQ, dK, dV
+
+
+_flash_backward_compiled = torch.compile(_flash_backward)
+
+
 class MyFlashAttnAutogradFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, is_causal=False):
@@ -49,5 +68,7 @@ class MyFlashAttnAutogradFunction(torch.autograd.Function):
         return O
 
     @staticmethod
-    def backward(ctx, do):
-        raise NotImplementedError
+    def backward(ctx, dO):
+        q, k, v, O, L = ctx.saved_tensors
+        dQ, dK, dV = _flash_backward_compiled(q, k, v, O, dO, L)
+        return dQ, dK, dV, None
