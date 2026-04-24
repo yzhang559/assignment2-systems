@@ -173,3 +173,33 @@ The largest allocations is around 128MB, stack trace
 
 the biggest allocations at longer context come from attention softmax/score-sized tensors
 
+# 3 Activation Checkpointing
+a. 
+
+Like divide and conquer, recursively nest checkpoints, split N into 2 halves and checkpoint each half, recursive down 
+the process until each checkpoint has 1 block. This gives O(logN) levels of nesting.
+
+peak memory O(1), during backward pass, only 1 block's intermediates are alive at a time. 
+compute cost, each block is recomputed once per nesting layer, so O(NlogN) total. 
+
+```python
+from torch.utils.checkpoint import checkpoint
+
+def checkpoint_block(blocks, x):
+    if len(blocks) == 1:
+        return blocks[0](x)
+    mid = len(blocks) // 2
+    left = lambda x: checkpoint_block(blocks[:mid], x)
+    right = lambda x: checkpoint_block(blocks[mid:], x)
+    x = checkpoint(left, x, use_reentrant=False)
+    x = checkpoint(right, x, use_reentrant=False)
+    return x
+```
+although in production, deep nested checkpoints leads to excessive recomputation, this is a theoretical analysis.
+
+b. 
+
+suppose k flat checkpoints, so the peak memory is k inputs for forward pass and N/k blocks for backward pass.
+O(k + N/k), the math minimum is when k = N/k, where k = sqrt(N), and the peak memory is O(sqrt(N))
+
+split N into sqrt(N) = 6 segments, each segment has 5 blocks. and wrapped in one checkpoint.
