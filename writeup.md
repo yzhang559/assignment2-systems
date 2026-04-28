@@ -174,7 +174,7 @@ the biggest allocations at longer context come from attention softmax/score-size
 a. 
 
 Like divide and conquer, recursively nest checkpoints, split N into 2 halves and checkpoint each half, recursive down 
-the process until each checkpoint has 1 block. This gives O(logN) levels of nesting.
+the process until each checkpoint has 1 block. This gives O(logN) levels of nesting. The algorithm looks like the merge sort
 
 peak memory O(1), during backward pass, only 1 block's intermediates are alive at a time. 
 compute cost, each block is recomputed once per nesting layer, so O(NlogN) total. 
