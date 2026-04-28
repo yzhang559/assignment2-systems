@@ -15,7 +15,8 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr,
                      scale,
                      D: tl.constexpr,
                      Q_TILE_SIZE: tl.constexpr,
-                     K_TILE_SIZE: tl.constexpr, ):
+                     K_TILE_SIZE: tl.constexpr,
+                     is_causal: tl.constexpr):
     # Program indices
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
@@ -67,6 +68,8 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr,
         order=(0,),
     )
 
+    q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+
     q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     m = tl.full((Q_TILE_SIZE,), float('-inf'), dtype=tl.float32)
@@ -74,9 +77,14 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr,
     o = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
 
     for i in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        k_offsets = i + tl.arange(0, K_TILE_SIZE)
         k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
         v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
         s_i_j = tl.dot(q, k.T) * scale
+
+        if is_causal:
+            causal_mask = q_offsets[:, None] >= k_offsets[None, :]
+            s_i_j = tl.where(causal_mask, s_i_j, -1e6)
 
         m_old = m
         m = tl.maximum(m, tl.max(s_i_j, axis=-1))
@@ -123,10 +131,11 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
             stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
             stride_lb=L.stride(0), stride_lq=L.stride(1),
             N_QUERIES=N_QUERIES, N_KEYS=N_KEYS, scale=scale, D=D, Q_TILE_SIZE=ctx.Q_TILE_SIZE,
-            K_TILE_SIZE=ctx.K_TILE_SIZE
+            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=is_causal
         )
 
-        ctx.save_for_backward(q, k, v, O, L)
+        ctx.save_for_backward(q, k, v, O, L, is_causal)
         return O
 
     @staticmethod
