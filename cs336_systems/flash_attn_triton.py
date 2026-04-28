@@ -3,6 +3,17 @@ import triton
 import triton.language as tl
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'Q_TILE_SIZE': 16, 'K_TILE_SIZE': 16}, num_warps=2),
+        triton.Config({'Q_TILE_SIZE': 32, 'K_TILE_SIZE': 32}, num_warps=4),
+        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 32}, num_warps=4),
+        triton.Config({'Q_TILE_SIZE': 64, 'K_TILE_SIZE': 64}, num_warps=4),
+        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 64}, num_warps=8),
+        triton.Config({'Q_TILE_SIZE': 128, 'K_TILE_SIZE': 128}, num_warps=8),
+    ],
+    key=['N_QUERIES', 'N_KEYS', 'D'],
+)
 @triton.jit
 def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr,
                      O_ptr, L_ptr,
@@ -117,24 +128,26 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
         assert q.is_cuda and k.is_cuda and v.is_cuda, "Expected CUDA tensors"
         assert q.is_contiguous(), "Our pointer arithmetic will assume contiguous q"
 
-        ctx.K_TILE_SIZE = 16
-        ctx.Q_TILE_SIZE = 16
         ctx.is_causal = is_causal
 
         O = torch.empty_like(q)
         L = torch.empty(q.shape[0], q.shape[1], device=q.device, dtype=torch.float32)
 
-        flash_fwd_kernel[(triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE), batch_size)](
+        grid = lambda meta: (triton.cdiv(N_QUERIES, meta['Q_TILE_SIZE']), batch_size)
+
+        flash_fwd_kernel[grid](
             q, k, v, O, L,
             stride_qb=q.stride(0), stride_qq=q.stride(1), stride_qd=q.stride(2),
             stride_kb=k.stride(0), stride_kk=k.stride(1), stride_kd=k.stride(2),
             stride_vb=v.stride(0), stride_vk=v.stride(1), stride_vd=v.stride(2),
             stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
             stride_lb=L.stride(0), stride_lq=L.stride(1),
-            N_QUERIES=N_QUERIES, N_KEYS=N_KEYS, scale=scale, D=D, Q_TILE_SIZE=ctx.Q_TILE_SIZE,
-            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            N_QUERIES=N_QUERIES, N_KEYS=N_KEYS, scale=scale, D=D,
             is_causal=ctx.is_causal
         )
+
+        ctx.Q_TILE_SIZE = flash_fwd_kernel.best_config.kwargs['Q_TILE_SIZE']
+        ctx.K_TILE_SIZE = flash_fwd_kernel.best_config.kwargs['K_TILE_SIZE']
 
         ctx.save_for_backward(q, k, v, O, L)
         return O
