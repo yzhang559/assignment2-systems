@@ -6,7 +6,6 @@ import torch.autograd
 def _flash_backward(q, k, v, O, dO, L, is_causal=False):
     d = q.shape[-1]
 
-    L = L.to(q.dtype)
     D = torch.sum(dO * O, dim=-1)
     S = q @ k.transpose(-1, -2) * (d ** -0.5)
     if is_causal:

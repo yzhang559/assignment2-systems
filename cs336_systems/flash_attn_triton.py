@@ -152,7 +152,7 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
         ctx.K_TILE_SIZE = flash_fwd_kernel.best_config.kwargs['K_TILE_SIZE']
         # print(f"N={N_QUERIES} D={D}: best_config = {flash_fwd_kernel.best_config}")
 
-        ctx.save_for_backward(q, k, v, O, L)
+        ctx.save_for_backward(q, k, v, O, L.to(q.dtype))
         return O
 
     @staticmethod
