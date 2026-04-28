@@ -119,6 +119,7 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
 
         ctx.K_TILE_SIZE = 16
         ctx.Q_TILE_SIZE = 16
+        ctx.is_causal = is_causal
 
         O = torch.empty_like(q)
         L = torch.empty(q.shape[0], q.shape[1], device=q.device, dtype=torch.float32)
@@ -132,10 +133,10 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
             stride_lb=L.stride(0), stride_lq=L.stride(1),
             N_QUERIES=N_QUERIES, N_KEYS=N_KEYS, scale=scale, D=D, Q_TILE_SIZE=ctx.Q_TILE_SIZE,
             K_TILE_SIZE=ctx.K_TILE_SIZE,
-            is_causal=is_causal
+            is_causal=ctx.is_causal
         )
 
-        ctx.save_for_backward(q, k, v, O, L, is_causal)
+        ctx.save_for_backward(q, k, v, O, L)
         return O
 
     @staticmethod
