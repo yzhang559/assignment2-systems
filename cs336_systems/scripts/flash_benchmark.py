@@ -78,13 +78,15 @@ def run_benchmarks():
             try:
                 fwd_ms   = bench_fwd(fn, q, k, v)[0]
             except Exception as e:
+                print(f"  [{impl_name} fwd error] {e}")
                 fwd_ms = float('nan')
 
             q, k, v = make_inputs(seq_len, dim, dtype)
             try:
                 e2e_ms = bench_fwd_bwd(fn, q, k, v)[0]
                 bwd_ms = e2e_ms - fwd_ms
-            except Exception:
+            except Exception as e:
+                print(f"  [{impl_name} e2e error] {e}")
                 bwd_ms = e2e_ms = float('nan')
 
             print(f"{impl_name:<10} {seq_len:>8} {dim:>5} {dtype_name:<12} {fwd_ms:>8.3f} {bwd_ms:>8.3f} {e2e_ms:>8.3f}")
