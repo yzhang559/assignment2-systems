@@ -2,6 +2,8 @@ import torch.autograd
 import triton
 import triton.language as tl
 
+from cs336_systems.flash_attn_pytorch import MyFlashAttnAutogradFunction
+
 
 @triton.autotune(
     configs=[
@@ -154,4 +156,4 @@ class MyFlashAttnTritonFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dO):
-        raise NotImplementedError
+        return MyFlashAttnAutogradFunction.backward(ctx, dO)
