@@ -23,15 +23,15 @@ def pytorch_attention(q, k, v, is_causal=True):
 
 
 def bench_fwd(fn, q, k, v):
-    return triton.testing.do_bench(lambda: fn(q, k, v, is_causal=True), quantiles=[0.5, 0.2, 0.8])
+    return triton.testing.do_bench(lambda: fn(q, k, v, True), quantiles=[0.5, 0.2, 0.8])
 
 
-def bench_bwd(fn, q, k, v, dtype):
+def bench_bwd(fn, q, k, v):
     do = torch.randn_like(q)
 
     def fwd_bwd():
         q.grad = k.grad = v.grad = None
-        out = fn(q, k, v, is_causal=True)
+        out = fn(q, k, v, True)
         out.backward(do)
 
     return triton.testing.do_bench(fwd_bwd, quantiles=[0.5, 0.2, 0.8])
@@ -42,7 +42,7 @@ def bench_fwd_bwd(fn, q, k, v):
 
     def fwd_bwd():
         q.grad = k.grad = v.grad = None
-        out = fn(q, k, v, is_causal=True)
+        out = fn(q, k, v, True)
         out.backward(do)
 
     return triton.testing.do_bench(fwd_bwd, quantiles=[0.5, 0.2, 0.8])
