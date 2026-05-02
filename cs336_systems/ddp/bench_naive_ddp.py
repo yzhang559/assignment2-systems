@@ -3,6 +3,7 @@ import json
 import os
 import statistics
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import List
 
@@ -14,6 +15,7 @@ from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy
 from cs336_systems.ddp.naive_ddp import DDP
+from cs336_systems.ddp.ddp_overlap_individual_parameters import DDPOverlapIndividualParameters
 
 
 def setup(rank, world_size, backend, master_addr, master_port):
@@ -32,36 +34,53 @@ def cleanup() -> None:
         dist.destroy_process_group()
 
 
-def run_one_iter(model: DDP,
+def run_one_iter(model: torch.nn.Module,
                  optimizer: torch.optim.Optimizer,
                  x_local: torch.Tensor,
                  y_local: torch.Tensor,
                  device: torch.device,
-                 use_flatten: bool = False):
+                 profile: bool = False,
+                 rank: int = 0):
+    def nvtx_range(msg: str):
+        if not profile or rank != 0:
+            return nullcontext()
+        return torch.cuda.nvtx.range(msg)
+
     optimizer.zero_grad(set_to_none=True)
 
     sync_if_cuda(device)
     start_time = time.time()
 
-    logits = model(x_local)
-    loss = cross_entropy(logits, y_local)
-    loss.backward()
+    with nvtx_range("forward"):
+        logits = model(x_local)
+        loss = cross_entropy(logits, y_local)
+
+    with nvtx_range("backward"):
+        loss.backward()
 
     sync_if_cuda(device)
     comm_start = time.time()
-    if use_flatten:
-        model.finish_gradient_synchronization_flatten()
-    else:
+    with nvtx_range("grad_sync"):
         model.finish_gradient_synchronization()
     sync_if_cuda(device)
     comm_time = time.time() - comm_start
 
-    optimizer.step()
+    with nvtx_range("optimizer"):
+        optimizer.step()
 
     sync_if_cuda(device)
     total_time = time.time() - start_time
 
     return total_time, comm_time
+
+
+def build_model(impl: str, base_model: torch.nn.Module) -> torch.nn.Module:
+    if impl == "overlap":
+        return DDPOverlapIndividualParameters(base_model)
+    ddp = DDP(base_model)
+    if impl == "flatten":
+        ddp.finish_gradient_synchronization = ddp.finish_gradient_synchronization_flatten
+    return ddp
 
 
 def worker(rank: int,
@@ -73,7 +92,8 @@ def worker(rank: int,
            master_addr: str,
            master_port: int,
            jsonl_path: str,
-           use_flatten: bool = False):
+           impl: str = "naive",
+           profile: bool = False):
     try:
         setup(rank, world_size, backend=backend, master_addr=master_addr, master_port=master_port)
         use_cuda = backend == "nccl"
@@ -86,7 +106,7 @@ def worker(rank: int,
             device = torch.device("cpu")
 
         model = build_xl_model(device=device, dtype=torch.float32)
-        model = DDP(model)
+        model = build_model(impl, model)
         torch.manual_seed(1234)
         x, y = make_random_batch(batch_size=global_batch_size, context_length=512, vocab_size=10000, device=device)
 
@@ -98,17 +118,20 @@ def worker(rank: int,
         optimizer = AdamW(model.parameters())
 
         for _ in range(warmup):
-            run_one_iter(model, optimizer, x_local, y_local, device, use_flatten=use_flatten)
+            run_one_iter(model, optimizer, x_local, y_local, device, rank=rank)
 
         dist.barrier()
         total_times: List[float] = []
         comm_times: List[float] = []
 
+        if profile:
+            torch.cuda.cudart().cudaProfilerStart()
         for _ in range(num_iter):
-            total_time, comm_time = run_one_iter(model, optimizer, x_local, y_local, device, use_flatten=use_flatten)
+            total_time, comm_time = run_one_iter(model, optimizer, x_local, y_local, device, profile=profile, rank=rank)
             total_times.append(total_time)
             comm_times.append(comm_time)
-
+        if profile:
+            torch.cuda.cudart().cudaProfilerStop()
         gather_total_times: List[List[float]] = [[] for _ in range(world_size)]
         gather_comm_times: List[List[float]] = [[] for _ in range(world_size)]
         dist.all_gather_object(gather_total_times, total_times)
@@ -120,10 +143,9 @@ def worker(rank: int,
             mean_total_ms = statistics.mean(all_total) * 1000
             mean_comm_ms = statistics.mean(all_comm) * 1000
             comm_fraction = mean_comm_ms / mean_total_ms
-            method = "flatten" if use_flatten else "naive"
             row = {
                 "backend": backend,
-                "method": method,
+                "method": impl,
                 "world_size": world_size,
                 "global_batch_size": global_batch_size,
                 "warmup_steps": warmup,
@@ -133,7 +155,7 @@ def worker(rank: int,
                 "comm_fraction": comm_fraction,
             }
             print(
-                f"[{method}] world_size={world_size} "
+                f"[{impl}] world_size={world_size} "
                 f"total={mean_total_ms:.1f}ms comm={mean_comm_ms:.1f}ms "
                 f"comm_frac={comm_fraction:.2%}",
                 flush=True,
@@ -176,7 +198,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
     parser.add_argument("--master-port", type=str, default="29500")
     parser.add_argument("--jsonl-path", type=str, default="./results/naive_dpp.jsonl")
-    parser.add_argument("--use-flatten", action="store_true", default=False)
+    parser.add_argument("--impl", type=str, default="naive", choices=["naive", "flatten", "overlap"])
+    parser.add_argument("--profile", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -194,7 +217,8 @@ def main():
             args.master_addr,
             args.master_port,
             args.jsonl_path,
-            args.use_flatten,
+            args.impl,
+            args.profile,
         ),
         nprocs=args.world_size,
         join=True,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from cs336_systems.ddp.ddp_overlap_individual_parameters import DDPOverlapIndividualParameters
 
 
 def get_flashattention_autograd_function_pytorch() -> type:
@@ -54,7 +55,7 @@ def get_ddp(module: torch.nn.Module) -> torch.nn.Module:
     """
     # For example: return DDP(module)
     from cs336_systems.ddp.naive_ddp import DDP
-    return DDP(module)
+    return DDPOverlapIndividualParameters(module)
 
 
 def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
