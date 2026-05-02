@@ -36,7 +36,8 @@ def run_one_iter(model: DPP,
                  optimizer: torch.optim.Optimizer,
                  x_local: torch.Tensor,
                  y_local: torch.Tensor,
-                 device: torch.device):
+                 device: torch.device,
+                 use_flatten: bool = False):
     optimizer.zero_grad(set_to_none=True)
 
     sync_if_cuda(device)
@@ -48,7 +49,10 @@ def run_one_iter(model: DPP,
 
     sync_if_cuda(device)
     comm_start = time.time()
-    model.finish_gradient_synchronization()
+    if use_flatten:
+        model.finish_gradient_synchronization_flatten()
+    else:
+        model.finish_gradient_synchronization()
     sync_if_cuda(device)
     comm_time = time.time() - comm_start
 
@@ -68,7 +72,8 @@ def worker(rank: int,
            num_iter: int,
            master_addr: str,
            master_port: int,
-           jsonl_path: str):
+           jsonl_path: str,
+           use_flatten: bool = False):
     try:
         setup(rank, world_size, backend=backend, master_addr=master_addr, master_port=master_port)
         use_cuda = backend == "nccl"
@@ -93,14 +98,14 @@ def worker(rank: int,
         optimizer = AdamW(model.parameters())
 
         for _ in range(warmup):
-            run_one_iter(model, optimizer, x_local, y_local, device)
+            run_one_iter(model, optimizer, x_local, y_local, device, use_flatten=use_flatten)
 
         dist.barrier()
         total_times: List[float] = []
         comm_times: List[float] = []
 
         for _ in range(num_iter):
-            total_time, comm_time = run_one_iter(model, optimizer, x_local, y_local, device)
+            total_time, comm_time = run_one_iter(model, optimizer, x_local, y_local, device, use_flatten=use_flatten)
             total_times.append(total_time)
             comm_times.append(comm_time)
 
@@ -115,8 +120,10 @@ def worker(rank: int,
             mean_total_ms = statistics.mean(all_total) * 1000
             mean_comm_ms = statistics.mean(all_comm) * 1000
             comm_fraction = mean_comm_ms / mean_total_ms
+            method = "flatten" if use_flatten else "naive"
             row = {
                 "backend": backend,
+                "method": method,
                 "world_size": world_size,
                 "global_batch_size": global_batch_size,
                 "warmup_steps": warmup,
@@ -126,7 +133,7 @@ def worker(rank: int,
                 "comm_fraction": comm_fraction,
             }
             print(
-                f"[naive_dpp] world_size={world_size} "
+                f"[{method}] world_size={world_size} "
                 f"total={mean_total_ms:.1f}ms comm={mean_comm_ms:.1f}ms "
                 f"comm_frac={comm_fraction:.2%}",
                 flush=True,
@@ -169,6 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
     parser.add_argument("--master-port", type=str, default="29500")
     parser.add_argument("--jsonl-path", type=str, default="./results/naive_dpp.jsonl")
+    parser.add_argument("--use-flatten", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -186,6 +194,7 @@ def main():
             args.master_addr,
             args.master_port,
             args.jsonl_path,
+            args.use_flatten,
         ),
         nprocs=args.world_size,
         join=True,
