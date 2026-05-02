@@ -4,7 +4,7 @@ from torch import nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 
-class DPP(nn.Module):
+class DDP(nn.Module):
 
     def __init__(self, module: nn.Module):
         super().__init__()

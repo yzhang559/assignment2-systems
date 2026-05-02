@@ -13,7 +13,7 @@ import torch.multiprocessing as mp
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy
-from cs336_systems.dpp.naive_dpp import DPP
+from cs336_systems.ddp.naive_ddp import DDP
 
 
 def setup(rank, world_size, backend, master_addr, master_port):
@@ -32,7 +32,7 @@ def cleanup() -> None:
         dist.destroy_process_group()
 
 
-def run_one_iter(model: DPP,
+def run_one_iter(model: DDP,
                  optimizer: torch.optim.Optimizer,
                  x_local: torch.Tensor,
                  y_local: torch.Tensor,
@@ -86,7 +86,7 @@ def worker(rank: int,
             device = torch.device("cpu")
 
         model = build_xl_model(device=device, dtype=torch.float32)
-        model = DPP(model)
+        model = DDP(model)
         torch.manual_seed(1234)
         x, y = make_random_batch(batch_size=global_batch_size, context_length=512, vocab_size=10000, device=device)
 

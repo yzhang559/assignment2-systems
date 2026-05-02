@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from cs336_systems.dpp.utils import DDPCommBenchmarkReporter, DDPCommRow
+from cs336_systems.ddp.utils import DDPCommBenchmarkReporter, DDPCommRow
 
 
 def setup(rank, world_size, backend, master_addr, master_port):
